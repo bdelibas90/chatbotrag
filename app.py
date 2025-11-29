@@ -1,5 +1,6 @@
 from datetime import date
 import os
+import re
 
 import requests
 from dotenv import load_dotenv
@@ -19,6 +20,16 @@ load_dotenv()
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")          # örn: appOrTVQJzXgO4oNg
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")    # örn: "Leads"
+
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def is_valid_email(email: str) -> bool:
+    if not email:
+        return False
+    return EMAIL_REGEX.match(email.strip()) is not None
+
+
 
 
 # -----------------------------
@@ -293,8 +304,10 @@ LANG_NAME_MAP = {
     "es": "Spanish",
     "fr": "French",
     "de": "German",
-    # gerekirse ekleyebilirsin
+    "el": "Greek",
+    "bg": "Bulgarian",
 }
+
 
 def detect_language(text: str) -> tuple[str, str]:
     """
@@ -323,39 +336,87 @@ Text:
     return code, lang_name
 
 WELCOME_MESSAGES = {
-    "tr": (
-        "KeloidCare Clinic Sanal Asistanı 👋\n"
-        "Keloid ve hipertrofik skar tedavileri, işlemler, iyileşme süreci ve randevu seçenekleri "
-        "hakkında sorularını yanıtlayabilirim. Bugün sana nasıl yardımcı olabiliriz?"
-    ),
     "en": (
-        "KeloidCare Clinic AI Assistant 👋\n"
-        "I can help you with questions about keloid and hypertrophic scar treatments, procedures, "
-        "recovery and appointments. How can we support you today?"
+        "Hi There! Welcome to The Keloidcare clinic.\n"
+        "What should I call you?"
+    ),
+    "tr": (
+        "Merhaba! Keloidcare Kliniğine hoş geldin.\n"
+        "Sana nasıl hitap edelim?"
     ),
     "fr": (
-        "Assistant IA de la clinique KeloidCare 👋\n"
-        "Je peux t’aider pour tes questions sur les traitements des chéloïdes et des cicatrices hypertrophiques, "
-        "les procédures, la récupération et les rendez-vous. Comment pouvons-nous t’aider aujourd’hui ?"
+        "Salut ! Bienvenue à la clinique Keloidcare.\n"
+        "Comment veux-tu qu’on t’appelle ?"
     ),
     "de": (
-        "KeloidCare Clinic KI-Assistent 👋\n"
-        "Wir helfen dir gern bei Fragen zu Keloid- und Narbenbehandlungen, Abläufen, Heilung und Terminen. "
-        "Womit können wir dich heute unterstützen?"
+        "Hi! Willkommen in der Keloidcare Klinik.\n"
+        "Wie dürfen wir dich nennen?"
+    ),
+    "el": (
+        "Γεια σου! Καλώς ήρθες στην κλινική Keloidcare.\n"
+        "Πώς να σε φωνάζουμε;"
+    ),
+    "bg": (
+        "Здрасти! Добре дошъл/дошла в клиниката Keloidcare.\n"
+        "Как да те наричаме?"
     ),
     "es": (
-        "Asistente IA de KeloidCare Clinic 👋\n"
-        "Puedo ayudarte con dudas sobre tratamientos de queloides y cicatrices hipertróficas, procedimientos, "
-        "recuperación y citas. ¿Cómo podemos ayudarte hoy?"
+        "¡Hola! Bienvenido a la clínica Keloidcare.\n"
+        "¿Cómo quieres que te llamemos?"
     ),
 }
+
+# IP'den ülke kodu geldiğinde hangi dili kullanacağımız
+COUNTRY_LANG_MAP = {
+    "FR": "fr",
+    "DE": "de",
+    "GR": "el",   # Yunanistan
+    "BG": "bg",
+    "TR": "tr",
+}
+
+def get_country_code_from_ip(ip: str) -> str | None:
+    """
+    IP'den ülke kodu almak için basit bir servis kullanıyoruz.
+    Prod ortamında istersen farklı bir provider'a geçebilirsin.
+    """
+    try:
+        if not ip or ip in ("127.0.0.1", "::1", "localhost"):
+            return None
+
+        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
+        if resp.status_code == 200:
+            data = resp.json()
+            code = data.get("country_code")
+            if isinstance(code, str):
+                return code.upper()
+    except Exception as e:
+        print("IP geolocation error:", e)
+    return None
 
 
 def get_preferred_lang_from_request(request: Request) -> str:
     """
-    Kullanıcının dilini Accept-Language başlığından tahmin et.
-    İstersen burayı IP -> ülke -> dil şeklinde güncelleyebilirsin.
+    1) Önce IP'den ülke kodunu bul.
+       - FR -> Fransızca
+       - DE -> Almanca
+       - GR -> Yunanca
+       - BG -> Bulgarca
+       - TR -> Türkçe
+       - Diğer tüm ülkeler -> İngilizce
+    2) IP'den ülke alınamazsa (localhost vs.)
+       Accept-Language'e göre tahmin et, yine yoksa İngilizce.
     """
+    ip = _get_ip(request)
+    country_code = get_country_code_from_ip(ip)
+
+    if country_code:
+        if country_code in COUNTRY_LANG_MAP:
+            return COUNTRY_LANG_MAP[country_code]
+        # tanıdığımız ama map'te olmayan ülke -> İngilizce
+        return "en"
+
+    # fallback: Accept-Language
     header = request.headers.get("accept-language", "")
     if header:
         first = header.split(",")[0].strip()
@@ -364,7 +425,9 @@ def get_preferred_lang_from_request(request: Request) -> str:
         code = first.lower()
         if code in LANG_NAME_MAP:
             return code
-    return "tr"
+
+    return "en"
+
 
 
 def get_welcome_message(lang_code: str) -> str:
@@ -379,6 +442,14 @@ def get_welcome_message(lang_code: str) -> str:
 class ChatMessage(BaseModel):
     role: str    # "user" veya "assistant"
     content: str
+
+class NameRequest(BaseModel):
+    name: str
+
+
+class EmailRequest(BaseModel):
+    name: str
+    email: str
 
 class LeadPayload(BaseModel):
     name: str | None = None
@@ -977,6 +1048,77 @@ async def welcome(request: Request):
     """
     lang_code = get_preferred_lang_from_request(request)
     return {"lang": lang_code, "message": get_welcome_message(lang_code)}
+
+@app.post("/intro/name")
+async def intro_name(payload: NameRequest):
+    """
+    Kullanıcı adını yazdıktan sonraki adım.
+    2 mesaj döner:
+      1) I am Nicole! Nice to meet you, <name>!
+      2) May I know your email <name>? so I can get back to you if needed.
+    """
+    name = (payload.name or "").strip()
+    if not name:
+        name = "there"
+
+    msg1 = f"I am Nicole! Nice to meet you, {name}!"
+    msg2 = f"May I know your email {name}? so I can get back to you if needed."
+
+    return {
+        "name": name,
+        "messages": [msg1, msg2],
+    }
+
+
+@app.post("/intro/email")
+async def intro_email(payload: EmailRequest):
+    """
+    Kullanıcı email girdikten sonraki adım.
+    - Email formatı doğruysa -> Airtable'a (name + email) kaydedilir,
+      sonra CTA mesajı döner.
+    - Email formatı yanlışsa -> Airtable'a hiçbir şey gönderilmez,
+      şu mesaj döner:
+      "No problem name, if you do not want to share your email address! ..."
+    """
+    name = (payload.name or "").strip() or "there"
+    email = (payload.email or "").strip()
+
+    # 4. madde: yanlış format veya kullanıcı vermek istemiyor
+    if not is_valid_email(email):
+        msg = (
+            f"No problem {name}, if you do not want to share your email address! "
+            "I am here to find what you need. What are you looking for?"
+        )
+        return {
+            "name": name,
+            "email": None,
+            "valid": False,
+            "messages": [msg],
+        }
+
+    # 3. madde: email formatı doğru -> Airtable'a yolla
+    try:
+        lead_payload = LeadPayload(
+            name=name,
+            email=email,
+            message=None,
+            conversation=None,
+        )
+        send_lead_to_airtable(lead_payload)
+    except Exception as e:
+        # Airtable hatasını logla ama kullanıcıya hata gösterme
+        print("Error sending lead to Airtable:", e)
+
+    msg = (
+        f"Thank you {name}! I am here to find what you need. What are you looking for?"
+    )
+
+    return {
+        "name": name,
+        "email": email,
+        "valid": True,
+        "messages": [msg],
+    }
 
 
 @app.post("/ask")
