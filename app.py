@@ -434,6 +434,100 @@ def get_welcome_message(lang_code: str) -> str:
     return WELCOME_MESSAGES.get(lang_code, WELCOME_MESSAGES["en"])
 
 
+def build_intro_messages(lang_code: str, name: str) -> list[str]:
+    """
+    İlk karşılama sonrası isim ve e-posta soruları.
+    Dil bulunamazsa İngilizce döner.
+    """
+    templates = {
+        "en": (
+            "I am Nicole! Nice to meet you, {name}!",
+            "May I know your email {name}? so I can get back to you if needed."
+        ),
+        "tr": (
+            "Ben Nicole! Tanıştığımıza memnun oldum, {name}!",
+            "{name}, e-posta adresini alabilir miyim? Gerekirse sana dönebilmem için."
+        ),
+        "fr": (
+            "Je suis Nicole ! Ravi de te rencontrer, {name} !",
+            "Puis-je avoir ton email {name} ? Ainsi je pourrai te recontacter si besoin."
+        ),
+        "de": (
+            "Ich bin Nicole! Schön, dich kennenzulernen, {name}!",
+            "Darf ich deine E-Mail {name} haben, damit ich mich bei Bedarf melden kann?"
+        ),
+        "el": (
+            "Είμαι η Nicole! Χαίρομαι που σε γνωρίζω, {name}!",
+            "Μπορώ να έχω το email σου {name}; ώστε να μπορώ να σε ενημερώσω αν χρειαστεί."
+        ),
+        "bg": (
+            "Аз съм Никол! Приятно ми е да се запознаем, {name}!",
+            "Мога ли да взема имейла ти, {name}, за да се свържа при нужда?"
+        ),
+    }
+
+    msg1, msg2 = templates.get(lang_code, templates["en"])
+    return [msg1.format(name=name), msg2.format(name=name)]
+
+
+def build_invalid_email_message(lang_code: str, name: str) -> str:
+    """
+    Hatalı e-posta mesajını diline göre döner, bulunamazsa İngilizce.
+    """
+    templates = {
+        "en": (
+            "No problem {name}, if you do not want to share your email address! "
+            "I am here to find what you need. What are you looking for?"
+        ),
+        "tr": (
+            "Hiç sorun değil {name}, e-posta adresini paylaşmak istemezsen! "
+            "İhtiyacın olanı bulmana yardım etmek için buradayım. Ne arıyorsun?"
+        ),
+        "fr": (
+            "Pas de souci {name} si tu ne veux pas partager ton email ! "
+            "Je suis là pour t’aider. Que recherches-tu ?"
+        ),
+        "de": (
+            "Kein Problem {name}, falls du deine E-Mail nicht teilen möchtest! "
+            "Ich bin hier, um zu finden, was du brauchst. Wonach suchst du?"
+        ),
+        "el": (
+            "Κανένα πρόβλημα {name} αν δεν θέλεις να μοιραστείς το email σου! "
+            "Είμαι εδώ για να βρω αυτό που χρειάζεσαι. Τι ψάχνεις;"
+        ),
+        "bg": (
+            "Няма проблем {name}, ако не искаш да споделиш имейла си! "
+            "Тук съм, за да намеря от какво имаш нужда. Какво търсиш?"
+        ),
+    }
+    return templates.get(lang_code, templates["en"]).format(name=name)
+
+
+def build_email_thanks_message(lang_code: str, name: str) -> str:
+    """
+    Geçerli e-posta sonrası teşekkür mesajı, bulunamazsa İngilizce.
+    """
+    templates = {
+        "en": (
+            "Thank you {name}! I am here to find what you need. What are you looking for?"
+        ),
+        "tr": (
+            "Teşekkürler {name}! İhtiyacın olanı bulmana yardım etmek için buradayım. Ne arıyorsun?"
+        ),
+        "fr": (
+            "Merci {name} ! Je suis là pour t’aider à trouver ce dont tu as besoin. Que recherches-tu ?"
+        ),
+        "de": (
+            "Danke {name}! Ich bin hier, um zu finden, was du brauchst. Wonach suchst du?"
+        ),
+        "el": (
+            "Ευχαριστούμε {name}! Είμαι εδώ για να βρω αυτό που χρειάζεσαι. Τι ψάχνεις;"
+        ),
+        "bg": (
+            "Благодаря ти, {name}! Тук съм, за да намерим от какво имаш нужда. Какво търсиш?"
+        ),
+    }
+    return templates.get(lang_code, templates["en"]).format(name=name)
 
 
 
@@ -1050,28 +1144,25 @@ async def welcome(request: Request):
     return {"lang": lang_code, "message": get_welcome_message(lang_code)}
 
 @app.post("/intro/name")
-async def intro_name(payload: NameRequest):
+async def intro_name(payload: NameRequest, request: Request):
     """
     Kullanıcı adını yazdıktan sonraki adım.
-    2 mesaj döner:
+    2 mesaj döner (IP / Accept-Language ile tespit edilen dilde):
       1) I am Nicole! Nice to meet you, <name>!
       2) May I know your email <name>? so I can get back to you if needed.
     """
-    name = (payload.name or "").strip()
-    if not name:
-        name = "there"
-
-    msg1 = f"I am Nicole! Nice to meet you, {name}!"
-    msg2 = f"May I know your email {name}? so I can get back to you if needed."
+    name = (payload.name or "").strip() or "there"
+    lang_code = get_preferred_lang_from_request(request)
+    messages = build_intro_messages(lang_code, name)
 
     return {
         "name": name,
-        "messages": [msg1, msg2],
+        "messages": messages,
     }
 
 
 @app.post("/intro/email")
-async def intro_email(payload: EmailRequest):
+async def intro_email(payload: EmailRequest, request: Request):
     """
     Kullanıcı email girdikten sonraki adım.
     - Email formatı doğruysa -> Airtable'a (name + email) kaydedilir,
@@ -1081,14 +1172,12 @@ async def intro_email(payload: EmailRequest):
       "No problem name, if you do not want to share your email address! ..."
     """
     name = (payload.name or "").strip() or "there"
+    lang_code = get_preferred_lang_from_request(request)
     email = (payload.email or "").strip()
 
     # 4. madde: yanlış format veya kullanıcı vermek istemiyor
     if not is_valid_email(email):
-        msg = (
-            f"No problem {name}, if you do not want to share your email address! "
-            "I am here to find what you need. What are you looking for?"
-        )
+        msg = build_invalid_email_message(lang_code, name)
         return {
             "name": name,
             "email": None,
@@ -1109,9 +1198,7 @@ async def intro_email(payload: EmailRequest):
         # Airtable hatasını logla ama kullanıcıya hata gösterme
         print("Error sending lead to Airtable:", e)
 
-    msg = (
-        f"Thank you {name}! I am here to find what you need. What are you looking for?"
-    )
+    msg = build_email_thanks_message(lang_code, name)
 
     return {
         "name": name,
