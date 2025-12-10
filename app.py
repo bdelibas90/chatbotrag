@@ -23,6 +23,10 @@ AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")    # örn: "Leads"
 
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_NAME:
+    raise RuntimeError("Airtable env variables are not configured")
+
+
 
 def is_valid_email(email: str) -> bool:
     if not email:
@@ -125,6 +129,31 @@ route_prompt = ChatPromptTemplate.from_messages([
 ])
 
 question_router = route_prompt | structured_llm_router
+
+def fast_route(question: str) -> Literal["vectorstore", "websearch"]:
+    """
+    Basit keyword kontrolüyle sorunun keloid ile ilgili olup olmadığını tahmin eder.
+    Bariz keloid / skar sorularında direkt vectorstore döner, diğerlerinde websearch.
+    """
+    q = (question or "").lower()
+
+    keloid_keywords = [
+        "keloid",
+        "keloit",
+        "keloidcare",
+        "skar",
+        "scar",
+        "yara izi",
+        "yara izi tedavisi",
+        "keloid tedavisi",
+        "hypertrophic",
+        "hipertrofik",
+    ]
+
+    if any(kw in q for kw in keloid_keywords):
+        return "vectorstore"
+    return "websearch"
+
 
 # ============================================================
 # ============== CONVERSATION STAGE ROUTER ===================
@@ -581,12 +610,8 @@ CONVERSATION:
     )
     return resp.output_text.strip()
 
-
 def send_lead_to_airtable(payload: LeadPayload):
     """Hasta iletişim bilgilerini + sohbet özetini Airtable'a kaydeder."""
-
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_NAME:
-        raise RuntimeError("Airtable env variables are not configured")
 
     summary = summarize_conversation(payload.conversation) if payload.conversation else None
 
@@ -618,10 +643,23 @@ def send_lead_to_airtable(payload: LeadPayload):
     }
 
     r = requests.post(url, headers=headers, json=data)
+
+    # DEBUG
+    print("\n--- AIRTABLE DEBUG LOG ---")
+    print("URL:", url)
+    print("Headers:", headers)
+    print("Payload:", data)
+    print("Response Code:", r.status_code)
+    print("Response Body:", r.text)
+    print("--- END DEBUG LOG ---\n")
+
     if r.status_code not in (200, 201, 202):
         raise RuntimeError(f"Airtable error: {r.status_code} {r.text}")
 
     return r.json()
+
+
+
 
 
 # ============================================================
@@ -894,7 +932,9 @@ def apply_sales_style(
     base_answer: str,
     stage: str,
     lang_info: tuple[str, str] | None = None,
+    user_name: str | None = None,
 ) -> str:
+
     """
     Tıbbi olarak doğrulanmış cevabı (base_answer) HİÇ DEĞİŞTİRMEZ.
     Sadece, aşamaya (info / nurture / close) göre:
@@ -912,6 +952,16 @@ def apply_sales_style(
 
     stage_instructions = _build_stage_instruction(stage)
 
+    safe_name = (user_name or "").strip()
+    if safe_name:
+        name_instruction = (
+            f'The user\'s name is "{safe_name}". '
+            f'Use this name at most once, either in the intro or in the closing, '
+            f'in a natural way of addressing them. Do NOT repeat the name in every sentence.'
+        )
+    else:
+        name_instruction = "You do not know the user's name. Do not invent one."
+
     prompt = f"""
 You are a patient advisor and sales-oriented representative for a specialized keloid clinic.
 
@@ -919,6 +969,8 @@ The user's language is: {lang_name} (code: {lang_code}).
 You MUST write both paragraphs ONLY in {lang_name}.
 If the user's question is in Turkish, write in Turkish.
 If it is in English, write in English.
+
+{name_instruction}
 
 You will NOT write the medical explanation. That part is already prepared.
 Your job is ONLY to write:
@@ -950,6 +1002,7 @@ OUTPUT FORMAT (important):
 
 Do not mention the tags [INTRO] or [CLOSING] to the user; they are just for parsing.
 """
+
 
     resp = client.responses.create(
         model="gpt-4o-mini",
@@ -1050,7 +1103,9 @@ def smart_answer(
     user_question: str,
     precomputed_route=None,
     lang_info: tuple[str, str] | None = None,
+    user_name: str | None = None,
 ) -> tuple[str, dict]:
+
     """
     Cevap + metadata döner.
     meta = {
@@ -1062,9 +1117,19 @@ def smart_answer(
     if lang_info is None:
         lang_info = detect_language(user_question)
 
+    # 🔹 BURASI DEĞİŞTİ
     if precomputed_route is None:
-        route = question_router.invoke({"question": user_question})
+        # Önce hızlı kural tabanlı router ile tahmin et
+        fast_ds = fast_route(user_question)
+
+        if fast_ds == "vectorstore":
+            # Bariz keloid / skar sorularında LLM router'a gerek yok
+            route = RouteQuery(datasource="vectorstore")
+        else:
+            # Diğer sorularda LLM router devreye girsin
+            route = question_router.invoke({"question": user_question})
     else:
+        # Dışarıdan hazır route geldiyse onu kullan
         route = precomputed_route
 
     datasource = route.datasource
@@ -1089,7 +1154,7 @@ def smart_answer(
             stage = detect_stage(user_question)
             meta["stage"] = stage
             styled = apply_sales_style(
-                user_question, base_answer, stage, lang_info=lang_info
+                user_question, base_answer, stage, lang_info=lang_info, user_name=user_name
             )
             return styled, meta
 
@@ -1097,7 +1162,7 @@ def smart_answer(
         stage = detect_stage(user_question)
         meta["stage"] = stage
         styled_answer = apply_sales_style(
-            user_question, base_answer, stage, lang_info=lang_info
+            user_question, base_answer, stage, lang_info=lang_info, user_name=user_name
         )
         return styled_answer, meta
 
@@ -1107,8 +1172,6 @@ def smart_answer(
         meta["source"] = "websearch"
         return answer, meta
 
-
-
 # ============================================================
 # =========================== TEST ===========================
 # ============================================================
@@ -1117,8 +1180,6 @@ if __name__ == "__main__":
     print("\n--- TEST 1 (Keloid Question → Vectorstore) ---")
     print(smart_answer("Keloidlerim kizardi, cok korkuyorum ne yapmaliyim"))
 
-    print("\n--- TEST 2 (Normal Question → Websearch) ---")
-    print(smart_answer("bana daha once verdiginiz cevap beni kotu yapti, bilimsel cevap verdiginizi dusunmuyorum"))
 
 # ============================================================
 # ========================== FASTAPI =========================
@@ -1214,6 +1275,9 @@ async def ask_api(payload: dict, request: Request):
     if not question:
         return {"answer": ""}
 
+    # 👇 front-end'ten (widget'tan) gelen isim
+    user_name = (payload.get("name") or "").strip() or None
+
     # IP bazlı sayaçları al / güncelle
     ip = _get_ip(request)
     stats = _get_daily_counters(ip)
@@ -1223,24 +1287,31 @@ async def ask_api(payload: dict, request: Request):
     lang_code, lang_name = detect_language(lang_seed)
     lang_info = (lang_code, lang_name)
 
+    # 🔹 Önce hızlı router ile kaba bir tahmin yap
+    fast_ds = fast_route(question)
+
     # 1) Toplam günlük limit kontrolü (15 cevap)
     if stats["total"] >= TOTAL_DAILY_LIMIT:
         msg = build_limit_message(lang_code, "total")
         return {"answer": msg, "limit_reached": True}
 
-    # 2) Router ile sorunun keloid ile ilgili olup olmadığına bak
-    route = question_router.invoke({"question": question})
-    datasource = route.datasource
-
-    # Eğer tamamen alakasız (websearch) bir soruysa ve 3 hak kullanılmışsa
-    if datasource == "websearch" and stats["websearch"] >= WEBSEARCH_DAILY_LIMIT:
+    # 2) Eğer soru bariz keloid ile alakasızsa ve fast_route = websearch ise,
+    #    websearch limitini kontrol et
+    if fast_ds == "websearch" and stats["websearch"] >= WEBSEARCH_DAILY_LIMIT:
         msg = build_limit_message(lang_code, "websearch")
         return {"answer": msg, "limit_reached": True}
 
     # 3) Normal akış: cevabı üret
+    #    Burada precomputed_route GÖNDERMİYORUZ ki smart_answer kendi router'ını kullansın
     answer, meta = smart_answer(
-        question, precomputed_route=route, lang_info=lang_info
+        question,
+        precomputed_route=None,
+        lang_info=lang_info,
+        user_name=user_name,
     )
+
+    # Gerçek datasource'u meta'dan al
+    datasource = meta.get("datasource", fast_ds)
 
     # 4) Sayaçları cevaptan sonra artır
     stats["total"] += 1
@@ -1250,7 +1321,7 @@ async def ask_api(payload: dict, request: Request):
     return {
         "answer": answer,
         "meta": {
-            "datasource": meta.get("datasource", datasource),
+            "datasource": datasource,
             "source": meta.get("source"),
             "stage": meta.get("stage"),
             "limits": {
